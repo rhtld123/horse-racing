@@ -252,7 +252,7 @@ const HorseRacing: React.FC = () => {
         <div className="text-center mb-10" style={{ animation: 'float 3s ease-in-out infinite' }}>
           <div className="text-[120px] leading-none mb-2">🏇</div>
           <h1 className="text-7xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 via-red-400 to-yellow-400 tracking-tight">HORSE RACING</h1>
-          <p className="text-lg text-gray-400 mt-3">8마리의 명마가 펼치는 숨 막히는 레이스</p>
+          <p className="text-lg text-gray-400 mt-3">명마들이 펼치는 숨 막히는 레이스</p>
         </div>
         {/* 말 이름: 쉼표로 구분 → 입력한 개수만큼 출전 (색상 자동) */}
         <div className="mb-6">

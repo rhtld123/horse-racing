@@ -16,8 +16,8 @@ export class GameEngine {
     const scale = config?.speedScale ?? SPEED_SCALE;
     this.horses = list.map((h, i) => ({
       id: i, name: h.name, number: h.number, color: h.color, dark: h.dark,
-      position: 0, baseSpeed: (.032 + Math.random() * .035) * scale,
-      fatigue: .2 + Math.random() * .4, kick: .85 + Math.random() * .6,
+      position: 0, baseSpeed: (.04 + Math.random() * .016) * scale,
+      fatigue: .2 + Math.random() * .4, kick: .8 + Math.random() * .7,
       finished: false, lane: i, boost: 0,
     }));
     this.particles = [];
@@ -58,17 +58,18 @@ export class GameEngine {
       const h = horses[i];
       if (h.finished) continue;
       const p = h.position / 100;
-      const v = .82 + Math.random() * .36;
+      const v = .8 + Math.random() * .4;
       const stam = p > .7 ? 1 - (p - .7) * h.fatigue : 1;
       const k = p > .75 ? h.kick : 1;
-      const rubber = 1 + (maxPos - h.position) * 0.012;
+      // 추격(러버밴딩): 뒤처질수록 더 강하게 따라붙음
+      const rubber = 1 + (maxPos - h.position) * 0.018;
       const rank = ranks[i];
+      // 부스트: 선두 제외 전원 후보. 뒤일수록 발동 확률 ↑ + 지속시간 길게 (긴 추격 드라마)
       let boost = Math.max(0, h.boost - 1);
-      if (boost === 0 && rank >= 4 && p > .1 && p < .95) {
-        const tier = rank - 4;
-        if (Math.random() < .003 + tier * .003) boost = 55 + tier * 15 + Math.floor(Math.random() * 25);
+      if (boost === 0 && rank >= 1 && p > .1 && p < .95) {
+        if (Math.random() < .0016 + rank * .0016) boost = 45 + rank * 20 + Math.floor(Math.random() * 20);
       }
-      const bm = boost > 0 ? 1.85 + Math.max(0, rank - 4) * 0.06 : 1;
+      const bm = boost > 0 ? 1.35 + rank * 0.04 : 1;
       h.position = h.position + Math.max(0.02, h.baseSpeed * v * stam * k * rubber * bm);
       h.boost = boost;
       if (h.position >= 100) {
