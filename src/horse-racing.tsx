@@ -1,35 +1,29 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { HD, GameState, HorseSnapshot, FinishedHorse, MainMsg, RaceConfig, horseDef, MIN_HORSES, DEFAULT_HORSES, SPEED_SCALE } from './game/types';
+import { GameEngine } from './game/engine';
+import { Camera } from './game/camera';
+import { Renderer } from './game/renderer';
 
-interface Horse { id: number; name: string; number: number; color: string; dark: string; position: number; baseSpeed: number; fatigue: number; kick: number; finished: boolean; lane: number; boost: number; }
-interface FinishedHorse { id: number; name: string; number: number; color: string; rank: number; }
-interface Particle { id: number; x: number; y: number; vx: number; vy: number; life: number; max: number; s: number; fire?: boolean; }
-type GameState = 'start' | 'countdown' | 'racing' | 'finish';
+// 쉼표/줄바꿈으로 구분된 이름 문자열 → 이름 배열 (공백 제거, 빈 항목 제외)
+const parseNames = (s: string): string[] =>
+  s.split(/[,\n]/).map(x => x.trim()).filter(Boolean);
 
-const HD = [
-  { name: '불꽃', n: 1, c: '#ef4444', d: '#991b1b' },
-  { name: '번개', n: 2, c: '#3b82f6', d: '#1e3a8a' },
-  { name: '질풍', n: 3, c: '#22c55e', d: '#14532d' },
-  { name: '황금', n: 4, c: '#eab308', d: '#713f12' },
-  { name: '자주', n: 5, c: '#a855f7', d: '#581c87' },
-  { name: '벚꽃', n: 6, c: '#ec4899', d: '#831843' },
-  { name: '태양', n: 7, c: '#f97316', d: '#7c2d12' },
-  { name: '하늘', n: 8, c: '#06b6d4', d: '#164e63' },
+// 경주 속도 프리셋 (배율; SPEED_SCALE=0.75 가 '보통' 기본값)
+const SPEED_PRESETS: { label: string; value: number }[] = [
+  { label: '🐢 느림', value: 0.5 },
+  { label: '🏇 보통', value: SPEED_SCALE },
+  { label: '🐎 빠름', value: 1.0 },
+  { label: '⚡ 매우 빠름', value: 1.5 },
 ];
 
-const CX = 500, CY = 300, RX = 340, RY = 170, TW = 80;
+// 설정(config) → 시작 시점 UI 시드 스냅샷
+const seedSnapshots = (cfg: RaceConfig): HorseSnapshot[] =>
+  cfg.horses.map((h, i) => ({ id: i, name: h.name, number: h.number, color: h.color, position: 0, finished: false }));
 
-const trackPos = (progress: number, lane: number) => {
-  const a = (progress / 100) * Math.PI * 2 - Math.PI / 2;
-  const lo = (lane - 3.5) * (TW / 10);
-  const rx = RX + lo, ry = RY + lo * 0.48;
-  const x = CX + rx * Math.cos(a);
-  const y = CY + ry * Math.sin(a);
-  const tang = Math.atan2(ry * Math.cos(a), -rx * Math.sin(a)) * 180 / Math.PI;
-  return { x, y, tang };
-};
+const toSnapshot = (h: { id: number; name: string; number: number; color: string; position: number; finished: boolean }): HorseSnapshot =>
+  ({ id: h.id, name: h.name, number: h.number, color: h.color, position: h.position, finished: h.finished });
 
-
-// ─── Horse side silhouette ───
+// ─── Horse side silhouette (시작 화면 카드 미리보기 전용 SVG) ───
 const HorseSide = ({ c, dk, num, phase, sc }: { c: string; dk: string; num: number; phase: number; sc: number }) => {
   const t = phase * Math.PI * 2;
   const by = -Math.abs(Math.sin(t)) * 3;
@@ -64,211 +58,162 @@ const HorseSide = ({ c, dk, num, phase, sc }: { c: string; dk: string; num: numb
 const HorseRacing: React.FC = () => {
   const [gs, setGs] = useState<GameState>('start');
   const [cd, setCd] = useState(3);
-  const [, setTk] = useState(0);
-  const hr = useRef<Horse[]>([]);
-  const pr = useRef<Particle[]>([]);
-  const fr = useRef<FinishedHorse[]>([]);
-  const ar = useRef<number | null>(null);
-  const pid = useRef(0);
+  const [horses, setHorses] = useState<HorseSnapshot[]>([]);
+  const [finished, setFinished] = useState<FinishedHorse[]>([]);
+
+  // 경기 설정: 쉼표로 구분한 이름 문자열 → 파싱한 개수 = 말 마리 수 (색상/번호 자동)
+  const [nameInput, setNameInput] = useState(() => Array.from({ length: DEFAULT_HORSES }, (_, i) => horseDef(i).name).join(', '));
+  const [speed, setSpeed] = useState(SPEED_SCALE); // 경주 속도 배율 (기본 = 코드 상수)
+  const configRef = useRef<RaceConfig>({ horses: [] });
+
+  // Canvas / Worker
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const workerRef = useRef<Worker | null>(null);
+  const roRef = useRef<ResizeObserver | null>(null);
+  const attachedRef = useRef<HTMLCanvasElement | null>(null); // 전송 완료한 canvas 노드 (StrictMode 가드)
+
+  // 메인 스레드 폴백용 (OffscreenCanvas 미지원 시)
+  const engineRef = useRef<GameEngine>(new GameEngine());
+  const cameraRef = useRef<Camera>(new Camera());
+  const rendererRef = useRef<Renderer | null>(null);
+  const rafRef = useRef<number | null>(null);
+
+  // 타이밍
   const t0 = useRef(0);
   const tEnd = useRef(0);
-  const fm = useRef(0);
-  const camPX = useRef(CX);
-  const camPY = useRef(CY - RY);
-  const camRot = useRef(0);
-  const camZm = useRef(2.5);
   const cdT = useRef<ReturnType<typeof setInterval> | null>(null);
-  const camGRef = useRef<SVGGElement>(null);
 
   const confetti = useMemo(() => Array.from({ length: 80 }, (_, i) => ({
     x: ((i * 17 + 3) % 100), delay: (i * .37) % 4, dur: 2.5 + (i * .23) % 3,
     color: HD[i % 8].c, w: 5 + (i * 1.3) % 8, h: 8 + (i * 1.7) % 12,
   })), []);
 
-  useEffect(() => () => { if (cdT.current) clearInterval(cdT.current); if (ar.current) cancelAnimationFrame(ar.current); }, []);
-
-  const init = () => {
-    hr.current = HD.map((h, i) => ({ id: i, name: h.name, number: h.n, color: h.c, dark: h.d, position: 0, baseSpeed: .032 + Math.random() * .035, fatigue: .2 + Math.random() * .4, kick: .85 + Math.random() * .6, finished: false, lane: i, boost: 0 }));
-    pr.current = []; fr.current = []; pid.current = 0; fm.current = 0;
-    const s = trackPos(0, 3.5);
-    camPX.current = s.x; camPY.current = s.y; camRot.current = -s.tang; camZm.current = 2.5;
+  // 워커/래프/옵저버 정리 (사용자 reset 또는 라우트 이탈 시)
+  const stop = () => {
+    if (roRef.current) { roRef.current.disconnect(); roRef.current = null; }
+    if (workerRef.current) { workerRef.current.terminate(); workerRef.current = null; }
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    attachedRef.current = null;
   };
 
-  const startCd = () => { init(); setCd(3); setGs('countdown'); let c = 3; cdT.current = setInterval(() => { c--; if (c > 0) setCd(c); else { clearInterval(cdT.current!); cdT.current = null; setCd(0); setTimeout(() => { t0.current = performance.now(); setGs('racing'); }, 600); } }, 700); };
+  useEffect(() => () => { if (cdT.current) clearInterval(cdT.current); stop(); }, []);
 
+  // 이름 문자열 파싱 → 경기 설정 (이름 개수 = 마리 수, 색상/번호는 인덱스 순서 자동)
+  const buildConfig = (): RaceConfig => ({
+    speedScale: speed,
+    horses: parseNames(nameInput).map((nm, i) => {
+      const def = horseDef(i);
+      return { name: nm.slice(0, 8) || def.name, color: def.color, dark: def.dark, number: def.number };
+    }),
+  });
+
+  const startCd = () => {
+    const cfg = buildConfig();
+    configRef.current = cfg;
+    setHorses(seedSnapshots(cfg)); setFinished([]);
+    setCd(3); setGs('countdown');
+    let c = 3;
+    cdT.current = setInterval(() => {
+      c--;
+      if (c > 0) setCd(c);
+      else {
+        clearInterval(cdT.current!); cdT.current = null; setCd(0);
+        setTimeout(() => { setGs('racing'); }, 600);
+      }
+    }, 700);
+  };
+
+  // ─── 레이스 시작: Worker + OffscreenCanvas (미지원 시 메인 스레드 폴백) ───
+  // StrictMode 안전: 같은 canvas 노드에는 한 번만 부착하고, 파괴적 cleanup 없음(정리는 stop()/reset()).
   useEffect(() => {
     if (gs !== 'racing') return;
-    const animate = () => {
-      fm.current++;
-      const horses = hr.current;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (attachedRef.current === canvas) return;
+    attachedRef.current = canvas;
 
-      // 순위 계산 (in-place, 배열 복사 최소화)
-      let maxPos = 0, allDone = true;
-      for (let i = 0; i < horses.length; i++) {
-        if (horses[i].position > maxPos) maxPos = horses[i].position;
-        if (!horses[i].finished) allDone = false;
-      }
-      if (allDone) { tEnd.current = performance.now(); setGs('finish'); return; }
+    const dpr = window.devicePixelRatio || 1;
+    const cw = canvas.clientWidth || 1000;
+    const ch = canvas.clientHeight || 600;
 
-      // 순위 배열 한 번만 만들기
-      const ranks: number[] = new Array(horses.length);
-      const posArr = horses.map(h => h.finished ? -1 : h.position);
-      const idxByPos = posArr.map((_, i) => i).sort((a, b) => posArr[b] - posArr[a]);
-      let r = 0;
-      for (const idx of idxByPos) { ranks[idx] = horses[idx].finished ? -1 : r++; }
+    setHorses(seedSnapshots(configRef.current));
+    setFinished([]);
 
-      // 말 업데이트 (in-place)
-      for (let i = 0; i < horses.length; i++) {
-        const h = horses[i];
-        if (h.finished) continue;
-        const p = h.position / 100;
-        const v = .82 + Math.random() * .36;
-        const stam = p > .7 ? 1 - (p - .7) * h.fatigue : 1;
-        const k = p > .75 ? h.kick : 1;
-        const rubber = 1 + (maxPos - h.position) * 0.012;
-        const rank = ranks[i];
-        let boost = Math.max(0, h.boost - 1);
-        if (boost === 0 && rank >= 4 && p > .1 && p < .95) {
-          const tier = rank - 4;
-          if (Math.random() < .003 + tier * .003) boost = 55 + tier * 15 + Math.floor(Math.random() * 25);
+    const supportsWorker = typeof Worker !== 'undefined'
+      && typeof canvas.transferControlToOffscreen === 'function'
+      && typeof OffscreenCanvas !== 'undefined';
+
+    // 메인 스레드 폴백 루프 (Phase 1 로직)
+    const startMain = () => {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      const engine = engineRef.current, camera = cameraRef.current;
+      if (!rendererRef.current) rendererRef.current = new Renderer();
+      const renderer = rendererRef.current;
+      engine.init(configRef.current); camera.reset(configRef.current.horses.length);
+      const ldpr = window.devicePixelRatio || 1;
+      const loop = () => {
+        const done = engine.tick();
+        camera.update(engine.horses);
+        const w = canvas.clientWidth || 1000, h = canvas.clientHeight || 600;
+        const dw = Math.round(w * ldpr), dh = Math.round(h * ldpr);
+        if (canvas.width !== dw || canvas.height !== dh) { canvas.width = dw; canvas.height = dh; }
+        renderer.drawFrame(ctx, w, h, ldpr, engine, camera);
+        if (engine.frame % 3 === 0 || done) {
+          setHorses(engine.horses.map(toSnapshot));
+          setFinished(engine.finished.map(f => ({ ...f })));
         }
-        const bm = boost > 0 ? 1.85 + Math.max(0, rank - 4) * 0.06 : 1;
-        h.position = h.position + Math.max(0.02, h.baseSpeed * v * stam * k * rubber * bm);
-        h.boost = boost;
-        if (h.position >= 100) {
-          h.position = 100; h.finished = true;
-          if (!fr.current.some(f => f.id === h.id))
-            fr.current.push({ id: h.id, name: h.name, number: h.number, color: h.color, rank: fr.current.length + 1 });
-        }
-      }
-
-      // 카메라: top4 평균 (정렬 없이 상위 4개 추출)
-      let top4Sum = 0, top4Cnt = 0;
-      const positions = horses.filter(h => !h.finished).map(h => h.position).sort((a, b) => b - a);
-      for (let i = 0; i < Math.min(4, positions.length); i++) { top4Sum += positions[i]; top4Cnt++; }
-      if (top4Cnt === 0) { top4Sum = 100; top4Cnt = 1; }
-      const camP = Math.min(top4Sum / top4Cnt + 3, 100);
-      const ct = trackPos(camP, 3.5);
-      camPX.current += (ct.x - camPX.current) * .03;
-      camPY.current += (ct.y - camPY.current) * .03;
-      let diff = -ct.tang - camRot.current;
-      diff = ((diff + 540) % 360) - 180;
-      camRot.current += diff * .025;
-      const spread = positions.length >= 2 ? positions[0] - positions[positions.length - 1] : 0;
-      const tz = spread > 25 ? 1.8 : spread > 15 ? 2.2 : spread > 8 ? 2.6 : 3.0;
-      camZm.current += (tz - camZm.current) * .01;
-
-      if (camGRef.current) {
-        camGRef.current.setAttribute('transform',
-          `translate(500,300) scale(${camZm.current}) rotate(${camRot.current}) translate(${-camPX.current},${-camPY.current})`);
-      }
-
-      // 파티클: 매 3프레임마다 먼지, 부스트는 매 프레임
-      const pts = pr.current;
-      for (let i = pts.length - 1; i >= 0; i--) {
-        const p = pts[i];
-        p.x += p.vx; p.y += p.vy; p.life--;
-        p.s *= p.fire ? .92 : .95;
-        if (p.life <= 0) { pts.splice(i, 1); }
-      }
-      if (fm.current % 3 === 0) {
-        for (const h of horses) {
-          if (h.finished) continue;
-          const tp = trackPos(h.position - .5, h.lane);
-          const trad = (tp.tang + 180) * Math.PI / 180;
-          pts.push({ id: pid.current++, x: tp.x + Math.cos(trad) * 5 + (Math.random() - .5) * 6, y: tp.y + Math.sin(trad) * 3 + (Math.random() - .5) * 4, vx: Math.cos(trad) * .5, vy: Math.sin(trad) * .2 - .2, life: 18, max: 26, s: 2 });
-        }
-      }
-      for (const h of horses) {
-        if (!h.boost || h.finished) continue;
-        const tp = trackPos(h.position - .5, h.lane);
-        const trad = (tp.tang + 180) * Math.PI / 180;
-        pts.push({ id: pid.current++, x: tp.x + Math.cos(trad) * 3 + (Math.random() - .5) * 6, y: tp.y + Math.sin(trad) * 2 + (Math.random() - .5) * 4, vx: Math.cos(trad) * .7, vy: Math.sin(trad) * .3 - .3, life: 14, max: 20, s: 2, fire: true });
-      }
-      if (pts.length > 80) pts.splice(0, pts.length - 80);
-
-      setTk(t => t + 1);
-      ar.current = requestAnimationFrame(animate);
+        if (done) { tEnd.current = performance.now(); setGs('finish'); return; }
+        rafRef.current = requestAnimationFrame(loop);
+      };
+      t0.current = performance.now();
+      rafRef.current = requestAnimationFrame(loop);
     };
-    ar.current = requestAnimationFrame(animate);
-    return () => { if (ar.current) cancelAnimationFrame(ar.current); };
+
+    if (!supportsWorker) { startMain(); return; }
+
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL('./game/worker.ts', import.meta.url));
+    } catch {
+      attachedRef.current = canvas; startMain(); return;
+    }
+    workerRef.current = worker;
+
+    let offscreen: OffscreenCanvas;
+    try {
+      offscreen = canvas.transferControlToOffscreen();
+    } catch {
+      worker.terminate(); workerRef.current = null;
+      startMain(); return;
+    }
+
+    worker.postMessage({ type: 'init', canvas: offscreen, cw, ch, dpr }, [offscreen]);
+    worker.onmessage = (ev: MessageEvent<MainMsg>) => {
+      const d = ev.data;
+      if (d.type === 'frame') { setHorses(d.horses); setFinished(d.finished); }
+      else if (d.type === 'done') {
+        setHorses(d.horses); setFinished(d.finished);
+        tEnd.current = performance.now(); setGs('finish');
+      }
+    };
+
+    const ro = new ResizeObserver(() => {
+      const w = canvas.clientWidth || 1000, h = canvas.clientHeight || 600;
+      worker.postMessage({ type: 'resize', cw: w, ch: h, dpr: window.devicePixelRatio || 1 });
+    });
+    ro.observe(canvas);
+    roRef.current = ro;
+
+    t0.current = performance.now();
+    worker.postMessage({ type: 'start', config: configRef.current });
   }, [gs]);
 
-  const reset = () => { setGs('start'); hr.current = []; pr.current = []; fr.current = []; };
+  const reset = () => { stop(); engineRef.current.reset(); setHorses([]); setFinished([]); setGs('start'); };
   const elapsed = () => Math.max(0, ((gs === 'finish' ? tEnd.current : performance.now()) - t0.current) / 1000);
   const fmt = (s: number) => `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}.${Math.floor((s * 100) % 100).toString().padStart(2, '0')}`;
 
-  // ─── 정적 트랙 요소 (한 번만 생성) ───
-  const staticTrack = useMemo(() => {
-    const fencePosts = Array.from({ length: 40 }, (_, i) => {
-      const a = (i / 40) * Math.PI * 2;
-      const orx = RX + TW / 2 + 6, ory = RY + TW / 2 + 6;
-      return { x: CX + orx * Math.cos(a), y: CY + ory * Math.sin(a), r: Math.atan2(ory * Math.cos(a), -orx * Math.sin(a)) * 180 / Math.PI };
-    });
-    const markers = [25, 50, 75].map(pct => {
-      const a = (pct / 100) * Math.PI * 2 - Math.PI / 2;
-      return { x: CX + (RX + TW / 2 + 22) * Math.cos(a), y: CY + (RY + TW / 2 + 22) * Math.sin(a), label: `${pct}%` };
-    });
-    const fy1 = CY - RY - TW / 2 - 14, fy2 = CY - RY + TW / 2 + 14, rows = 10, rh = (fy2 - fy1) / rows;
-
-    return (
-      <g>
-        <rect x={-500} y={-500} width={2500} height={2000} fill="#2a6a18" />
-        <ellipse cx={CX} cy={CY} rx={RX + TW / 2 + 50} ry={RY + TW / 2 + 50} fill="#1e5a12" />
-        <rect x={CX - 180} y={CY - RY + TW / 2 + 10} width={360} height={35} rx={4} fill="#4a4a5a" />
-        <rect x={CX - 175} y={CY - RY + TW / 2 + 14} width={350} height={26} rx={3} fill="#6a6a7a" />
-        {Array.from({ length: 15 }).map((_, i) => <rect key={i} x={CX - 170 + i * 23} y={CY - RY + TW / 2 + 17} width={5} height={4} fill="#ffe066" opacity={.3} rx={.5} />)}
-        <ellipse cx={CX} cy={CY} rx={RX + TW / 2 + 15} ry={RY + TW / 2 + 15} fill="#1a5010" />
-        <ellipse cx={CX} cy={CY} rx={RX + TW / 2} ry={RY + TW / 2} fill="#8b7355" />
-        <ellipse cx={CX} cy={CY} rx={RX - TW / 2} ry={RY - TW / 2} fill="#226a16" />
-        <ellipse cx={CX} cy={CY} rx={RX + TW / 2} ry={RY + TW / 2} fill="none" stroke="white" strokeWidth={2} opacity={.5} />
-        <ellipse cx={CX} cy={CY} rx={RX - TW / 2 + 2} ry={RY - TW / 2 + 2} fill="none" stroke="white" strokeWidth={2.5} strokeDasharray="10 5" opacity={.45} />
-        {fencePosts.map((fp, i) => <rect key={i} x={fp.x - 1} y={fp.y} width={2} height={8} fill="white" opacity={.5} transform={`rotate(${fp.r + 90},${fp.x},${fp.y})`} />)}
-        <ellipse cx={CX} cy={CY} rx={RX + TW / 2 + 6} ry={RY + TW / 2 + 6} fill="none" stroke="white" strokeWidth={1.5} opacity={.35} />
-        <g>
-          <rect x={CX - 12} y={fy1} width={24} height={fy2 - fy1} fill="white" opacity={.7} />
-          {Array.from({ length: rows }).map((_, i) => <rect key={i} x={CX - 10} y={fy1 + i * rh} width={10} height={rh / 2} fill={i % 2 === 0 ? '#222' : 'white'} opacity={.8} />)}
-          {Array.from({ length: rows }).map((_, i) => <rect key={`b${i}`} x={CX} y={fy1 + i * rh + rh / 2} width={10} height={rh / 2} fill={i % 2 === 0 ? '#222' : 'white'} opacity={.8} />)}
-        </g>
-        {markers.map((m, i) => <g key={i}><circle cx={m.x} cy={m.y} r={10} fill="white" opacity={.8} /><text x={m.x} y={m.y + 1} fontSize={7} fontWeight="bold" textAnchor="middle" dominantBaseline="middle" fill="#333">{m.label}</text></g>)}
-      </g>
-    );
-  }, []);
-
-  // ─── TRACK VIEW ───
-  const renderTrack = () => {
-    const horses = hr.current;
-    let leadId = 0, leadPos = -1;
-    for (const h of horses) { if (h.position > leadPos) { leadPos = h.position; leadId = h.id; } }
-
-    return (
-      <svg viewBox="0 0 1000 600" className="w-full h-full" style={{ background: '#1a4a10' }}>
-        <g ref={camGRef} transform={`translate(500,300) scale(${camZm.current}) rotate(${camRot.current}) translate(${-camPX.current},${-camPY.current})`}>
-          {staticTrack}
-
-          {/* Particles */}
-          {pr.current.map(p => <circle key={p.id} cx={p.x} cy={p.y} r={p.s} fill={p.fire ? (p.life / p.max > .5 ? '#fbbf24' : '#f97316') : '#c4a060'} opacity={p.life / p.max * (p.fire ? .7 : .45)} />)}
-
-          {/* Horses */}
-          {horses.map(h => {
-            const { x, y, tang } = trackPos(h.position, h.lane);
-            const phase = (fm.current * (.03 + h.baseSpeed * .3) + h.id * .3) % 1;
-            const boosting = h.boost > 0;
-            return (
-              <g key={h.id} transform={`translate(${x},${y}) rotate(${tang})`}>
-                {boosting && <ellipse cx={0} cy={0} rx={22} ry={14} fill="#fbbf24" opacity={.18} />}
-                <HorseSide c={h.color} dk={h.dark} num={h.number} phase={h.finished ? .25 : boosting ? (phase * 1.5) % 1 : phase} sc={.55} />
-                {h.id === leadId && !h.finished && !boosting && <text x={0} y={-18} fontSize={8} textAnchor="middle">👑</text>}
-                {boosting && <text x={0} y={-18} fontSize={9} textAnchor="middle">🔥</text>}
-              </g>
-            );
-          })}
-        </g>
-      </svg>
-    );
-  };
-
-  // ─── MINI MAP ───
+  // ─── MINI MAP (작은 SVG, 저빈도 갱신) ───
   const renderMiniMap = () => (
     <svg viewBox="0 0 160 110" className="w-40 h-28">
       <rect width="160" height="110" rx="8" fill="#000" opacity={.55} />
@@ -279,12 +224,12 @@ const HorseRacing: React.FC = () => {
       <line x1={80} y1={55 - 30} x2={80} y2={55 - 22} stroke="white" strokeWidth={2} opacity={.5} />
       {/* Camera cone */}
       {(() => {
-        const ca = (Math.min(hr.current.length > 0 ? [...hr.current].sort((a, b) => b.position - a.position).slice(0, 4).reduce((s, h) => s + h.position, 0) / 4 : 0, 100) / 100) * Math.PI * 2 - Math.PI / 2;
+        const ca = (Math.min(horses.length > 0 ? [...horses].sort((a, b) => b.position - a.position).slice(0, 4).reduce((s, h) => s + h.position, 0) / 4 : 0, 100) / 100) * Math.PI * 2 - Math.PI / 2;
         const cx2 = 80 + 50 * Math.cos(ca);
         const cy2 = 55 + 27 * Math.sin(ca);
         return <circle cx={cx2} cy={cy2} r={4} fill="yellow" opacity={.5} />;
       })()}
-      {hr.current.map(h => {
+      {horses.map(h => {
         const a = (Math.min(h.position, 100) / 100) * Math.PI * 2 - Math.PI / 2;
         return <circle key={h.id} cx={80 + 50 * Math.cos(a)} cy={55 + 27 * Math.sin(a)} r={2.5} fill={h.color} stroke="white" strokeWidth={.4} />;
       })}
@@ -309,15 +254,46 @@ const HorseRacing: React.FC = () => {
           <h1 className="text-7xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 via-red-400 to-yellow-400 tracking-tight">HORSE RACING</h1>
           <p className="text-lg text-gray-400 mt-3">8마리의 명마가 펼치는 숨 막히는 레이스</p>
         </div>
-        <div className="grid grid-cols-4 gap-3 mb-10">
-          {HD.map((h, i) => (
-            <div key={h.n} className="bg-gray-800/80 backdrop-blur rounded-xl p-3 border border-gray-700 hover:border-gray-500 hover:scale-105 transition-all" style={{ animation: `cardIn .5s ease-out ${i * .08}s both` }}>
-              <div className="flex items-center gap-2 mb-2"><div className="w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-sm shadow-lg" style={{ backgroundColor: h.c }}>{h.n}</div><span className="text-white font-semibold text-sm">{h.name}</span></div>
-              <svg viewBox="-35 -30 70 55" className="w-full h-16"><HorseSide c={h.c} dk={h.d} num={h.n} phase={.15} sc={1} /></svg>
-            </div>
-          ))}
+        {/* 말 이름: 쉼표로 구분 → 입력한 개수만큼 출전 (색상 자동) */}
+        <div className="mb-6">
+          <label className="block text-gray-300 font-semibold mb-2 text-center">말 이름 (쉼표로 구분)</label>
+          <textarea
+            value={nameInput}
+            onChange={e => setNameInput(e.target.value)}
+            rows={2}
+            placeholder="불꽃, 번개, 질풍"
+            className="w-full bg-gray-800/80 border border-gray-700 focus:border-yellow-400 rounded-xl px-4 py-3 text-white text-center outline-none resize-none"
+          />
+          <div className="text-center text-sm mt-2">
+            {parseNames(nameInput).length >= MIN_HORSES
+              ? <span className="text-gray-400">출전 말 <span className="text-yellow-400 font-bold">{parseNames(nameInput).length}</span>마리</span>
+              : <span className="text-red-400">최소 {MIN_HORSES}마리 이상 입력하세요</span>}
+          </div>
         </div>
-        <div className="text-center"><button onClick={startCd} className="bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 text-white font-black text-3xl px-16 py-5 rounded-full transition-all duration-300 transform hover:scale-110 active:scale-95" style={{ animation: 'glow 2s ease-in-out infinite' }}>START RACE 🏁</button></div>
+        <div className="grid grid-cols-4 gap-3 mb-10">
+          {parseNames(nameInput).map((nm, i) => {
+            const h = horseDef(i);
+            return (
+              <div key={i} className="bg-gray-800/80 backdrop-blur rounded-xl p-3 border border-gray-700 transition-all" style={{ animation: `cardIn .4s ease-out ${i * .03}s both` }}>
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-sm shadow-lg shrink-0" style={{ backgroundColor: h.color }}>{h.number}</div>
+                  <span className="text-white font-semibold text-sm truncate">{nm.slice(0, 8)}</span>
+                </div>
+                <svg viewBox="-35 -30 70 55" className="w-full h-16"><HorseSide c={h.color} dk={h.dark} num={h.number} phase={.15} sc={1} /></svg>
+              </div>
+            );
+          })}
+        </div>
+        {/* 경주 속도 선택 */}
+        <div className="mb-8">
+          <div className="text-gray-300 font-semibold mb-2 text-center">경주 속도</div>
+          <div className="flex justify-center gap-2 flex-wrap">
+            {SPEED_PRESETS.map(p => (
+              <button key={p.value} onClick={() => setSpeed(p.value)} className={`px-4 py-2 rounded-full font-semibold text-sm border transition-all ${speed === p.value ? 'bg-yellow-400 text-gray-900 border-yellow-400' : 'bg-gray-800/80 text-gray-300 border-gray-700 hover:border-gray-500'}`}>{p.label}</button>
+            ))}
+          </div>
+        </div>
+        <div className="text-center"><button onClick={startCd} disabled={parseNames(nameInput).length < MIN_HORSES} className="bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:scale-100 text-white font-black text-3xl px-16 py-5 rounded-full transition-all duration-300 transform hover:scale-110 active:scale-95" style={{ animation: 'glow 2s ease-in-out infinite' }}>START RACE 🏁</button></div>
       </div>
     </div>
   );
@@ -337,9 +313,8 @@ const HorseRacing: React.FC = () => {
   );
 
   // ─── RACING / FINISH ───
-  const horses = hr.current;
   const avg = horses.length > 0 ? horses.reduce((s, h) => s + h.position, 0) / horses.length : 0;
-  const finishRank = new Map(fr.current.map(f => [f.id, f.rank]));
+  const finishRank = new Map(finished.map(f => [f.id, f.rank]));
   const leaderboard = [...horses].sort((a, b) => {
     const ar = finishRank.get(a.id), br = finishRank.get(b.id);
     if (ar != null && br != null) return ar - br;
@@ -371,7 +346,7 @@ const HorseRacing: React.FC = () => {
       {/* Main */}
       <div className="flex flex-1 min-h-0">
         <div className="flex-1 relative">
-          {renderTrack()}
+          <canvas ref={canvasRef} className="w-full h-full block" style={{ background: '#1a4a10' }} />
           <div className="absolute bottom-3 left-3 z-10">{renderMiniMap()}</div>
         </div>
 
@@ -395,20 +370,20 @@ const HorseRacing: React.FC = () => {
       </div>
 
       {/* Finish overlay */}
-      {gs === 'finish' && fr.current.length > 0 && (
+      {gs === 'finish' && finished.length > 0 && (
         <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4" style={{ animation: 'fadeIn .8s ease-out' }}>
-          <div className="bg-gradient-to-b from-gray-900 to-gray-800 rounded-2xl max-w-xl w-full p-8 shadow-2xl border border-gray-600/50" style={{ animation: 'scaleIn .6s cubic-bezier(.17,.67,.35,1.2) .3s both' }}>
-            <h2 className="text-center text-3xl font-black text-white mb-6">🏆 경주 결과</h2>
-            <div className="flex justify-center items-end gap-3 mb-6 h-36">
-              {fr.current[1] && <div className="flex flex-col items-center w-24"><div className="text-2xl mb-1">🥈</div><div className="w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-lg shadow-lg" style={{ backgroundColor: fr.current[1].color }}>{fr.current[1].number}</div><div className="text-white text-sm font-semibold mt-1">{fr.current[1].name}</div><div className="bg-gray-500 w-full mt-1 rounded-t-lg" style={{ height: 44 }} /></div>}
-              {fr.current[0] && <div className="flex flex-col items-center w-28"><div className="text-3xl mb-1">🏆</div><div className="w-14 h-14 rounded-full flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-yellow-500/40" style={{ backgroundColor: fr.current[0].color }}>{fr.current[0].number}</div><div className="text-yellow-400 text-base font-bold mt-1">{fr.current[0].name}</div><div className="bg-yellow-500 w-full mt-1 rounded-t-lg" style={{ height: 60 }} /></div>}
-              {fr.current[2] && <div className="flex flex-col items-center w-24"><div className="text-xl mb-1">🥉</div><div className="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold" style={{ backgroundColor: fr.current[2].color }}>{fr.current[2].number}</div><div className="text-white text-sm font-semibold mt-1">{fr.current[2].name}</div><div className="bg-orange-700 w-full mt-1 rounded-t-lg" style={{ height: 30 }} /></div>}
+          <div className="bg-gradient-to-b from-gray-900 to-gray-800 rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-gray-600/50 max-h-[90vh] flex flex-col" style={{ animation: 'scaleIn .6s cubic-bezier(.17,.67,.35,1.2) .3s both' }}>
+            <h2 className="text-center text-3xl font-black text-white mb-4 shrink-0">🏆 경주 결과</h2>
+            <div className="flex justify-center items-end gap-3 mb-4 h-36 shrink-0">
+              {finished[1] && <div className="flex flex-col items-center w-24"><div className="text-2xl mb-1">🥈</div><div className="w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-lg shadow-lg" style={{ backgroundColor: finished[1].color }}>{finished[1].number}</div><div className="text-white text-sm font-semibold mt-1">{finished[1].name}</div><div className="bg-gray-500 w-full mt-1 rounded-t-lg" style={{ height: 44 }} /></div>}
+              {finished[0] && <div className="flex flex-col items-center w-28"><div className="text-3xl mb-1">🏆</div><div className="w-14 h-14 rounded-full flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-yellow-500/40" style={{ backgroundColor: finished[0].color }}>{finished[0].number}</div><div className="text-yellow-400 text-base font-bold mt-1">{finished[0].name}</div><div className="bg-yellow-500 w-full mt-1 rounded-t-lg" style={{ height: 60 }} /></div>}
+              {finished[2] && <div className="flex flex-col items-center w-24"><div className="text-xl mb-1">🥉</div><div className="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold" style={{ backgroundColor: finished[2].color }}>{finished[2].number}</div><div className="text-white text-sm font-semibold mt-1">{finished[2].name}</div><div className="bg-orange-700 w-full mt-1 rounded-t-lg" style={{ height: 30 }} /></div>}
             </div>
-            <div className="space-y-1.5 mb-6">
-              {fr.current.map((h, i) => <div key={h.id} className={`flex items-center gap-3 px-3 py-2 rounded-lg ${i < 3 ? 'bg-gray-700/60' : 'bg-gray-800/40'}`}><span className="w-6 text-center font-bold text-sm" style={{ color: i === 0 ? '#fbbf24' : i === 1 ? '#9ca3af' : i === 2 ? '#f97316' : '#6b7280' }}>{i + 1}위</span><div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold" style={{ backgroundColor: h.color }}>{h.number}</div><span className="text-white text-sm font-medium">{h.name}</span></div>)}
+            <div className="space-y-1.5 mb-4 overflow-y-auto flex-1 min-h-0 pr-1">
+              {finished.map((h, i) => <div key={h.id} className={`flex items-center gap-3 px-3 py-2 rounded-lg ${i < 3 ? 'bg-gray-700/60' : 'bg-gray-800/40'}`}><span className="w-6 text-center font-bold text-sm" style={{ color: i === 0 ? '#fbbf24' : i === 1 ? '#9ca3af' : i === 2 ? '#f97316' : '#6b7280' }}>{i + 1}위</span><div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold" style={{ backgroundColor: h.color }}>{h.number}</div><span className="text-white text-sm font-medium">{h.name}</span></div>)}
             </div>
-            <div className="text-center text-gray-400 text-sm mb-4">경주 기록: <span className="text-green-400 font-mono font-bold">{fmt(el)}</span></div>
-            <button onClick={reset} className="w-full bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white font-bold py-3 rounded-xl transition-all transform hover:scale-[1.02] active:scale-95 text-lg">다시 하기 🔄</button>
+            <div className="text-center text-gray-400 text-sm mb-3 mt-1 shrink-0">경주 기록: <span className="text-green-400 font-mono font-bold">{fmt(el)}</span></div>
+            <button onClick={reset} className="w-full bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white font-bold py-3 rounded-xl transition-all transform hover:scale-[1.02] active:scale-95 text-lg shrink-0">다시 하기 🔄</button>
           </div>
         </div>
       )}
