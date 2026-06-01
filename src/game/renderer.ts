@@ -92,6 +92,9 @@ export class Renderer {
     const { x, y, tang } = trackPos(h.position, h.lane, laneCount);
     const phase = (frame * (.03 + h.baseSpeed * .3) + h.id * .3) % 1;
     const boosting = h.boost > 0;
+    // 마리 수가 많으면 말/라벨 크기 축소 (겹침 완화). 약 8마리 이하는 0.55 유지
+    const sc = Math.max(0.3, Math.min(0.55, 6 / laneCount));
+    const k = sc / 0.55; // 라벨/아이콘 비례 계수
 
     ctx.save();
     ctx.translate(x, y);
@@ -101,39 +104,39 @@ export class Renderer {
       ctx.globalAlpha = .18;
       ctx.fillStyle = '#fbbf24';
       ctx.beginPath();
-      ctx.ellipse(0, 0, 22, 14, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, 0, 22 * k, 14 * k, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.globalAlpha = 1;
     }
 
     const ph = h.finished ? .25 : boosting ? (phase * 1.5) % 1 : phase;
     ctx.save();
-    ctx.scale(.55, .55);
+    ctx.scale(sc, sc);
     this.drawSilhouette(ctx, h.color, h.dark, h.number, ph);
     ctx.restore();
 
     if (h.id === leadId && !h.finished && !boosting) {
-      ctx.font = '8px sans-serif';
+      ctx.font = `${8 * k}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'alphabetic';
-      ctx.fillText('👑', 0, -16);
+      ctx.fillText('👑', 0, -16 * k);
     }
     if (boosting) {
-      ctx.font = '9px sans-serif';
+      ctx.font = `${9 * k}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'alphabetic';
-      ctx.fillText('🔥', 0, -16);
+      ctx.fillText('🔥', 0, -16 * k);
     }
 
-    // 이름표 (말 위, 반투명 배경 + 흰 글자)
+    // 이름표 (말 위, 항상 표시). 마리 수가 많으면 말과 함께 크기 축소(k)
     if (h.name) {
-      ctx.font = 'bold 7px sans-serif';
+      ctx.font = `bold ${7 * k}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       const tw = ctx.measureText(h.name).width;
-      this.roundRect(ctx, -tw / 2 - 3, -32, tw + 6, 10, 3, 'rgba(0,0,0,0.55)');
+      this.roundRect(ctx, -tw / 2 - 3 * k, -32 * k, tw + 6 * k, 10 * k, 3 * k, 'rgba(0,0,0,0.55)');
       ctx.fillStyle = '#ffffff';
-      ctx.fillText(h.name, 0, -27);
+      ctx.fillText(h.name, 0, -27 * k);
     }
 
     ctx.restore();

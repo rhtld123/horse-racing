@@ -27,14 +27,16 @@ export class Camera implements CameraState {
     const positions = horses.filter(h => !h.finished).map(h => h.position).sort((a, b) => b - a);
     for (let i = 0; i < Math.min(4, positions.length); i++) { top4Sum += positions[i]; top4Cnt++; }
     if (top4Cnt === 0) { top4Sum = 100; top4Cnt = 1; }
-    const camP = Math.min(top4Sum / top4Cnt + 3, 100);
+    // 캡 제거: 멀티랩에서도 선두를 계속 추적 (trackPos 가 한 바퀴마다 좌표를 wrap)
+    const camP = top4Sum / top4Cnt + 3;
     const ct = trackPos(camP, (laneCount - 1) / 2, laneCount);
     this.x += (ct.x - this.x) * .03;
     this.y += (ct.y - this.y) * .03;
     let diff = -ct.tang - this.rot;
     diff = ((diff + 540) % 360) - 180;
     this.rot += diff * .025;
-    const spread = positions.length >= 2 ? positions[0] - positions[positions.length - 1] : 0;
+    // 추월당해 한 바퀴 차이가 나도 줌이 튀지 않도록 spread 를 한 바퀴로 제한
+    const spread = positions.length >= 2 ? Math.min(positions[0] - positions[positions.length - 1], 100) : 0;
     const tz = spread > 25 ? 1.8 : spread > 15 ? 2.2 : spread > 8 ? 2.6 : 3.0;
     this.zoom += (tz - this.zoom) * .01;
   }

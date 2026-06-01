@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { HD, GameState, HorseSnapshot, FinishedHorse, MainMsg, RaceConfig, horseDef, MIN_HORSES, DEFAULT_HORSES, SPEED_SCALE } from './game/types';
+import { HD, GameState, HorseSnapshot, FinishedHorse, MainMsg, RaceConfig, horseDef, MIN_HORSES, DEFAULT_HORSES, SPEED_SCALE, MIN_LAPS, MAX_LAPS, DEFAULT_LAPS } from './game/types';
 import { GameEngine } from './game/engine';
 import { Camera } from './game/camera';
 import { Renderer } from './game/renderer';
@@ -7,6 +7,10 @@ import { Renderer } from './game/renderer';
 // 쉼표/줄바꿈으로 구분된 이름 문자열 → 이름 배열 (공백 제거, 빈 항목 제외)
 const parseNames = (s: string): string[] =>
   s.split(/[,\n]/).map(x => x.trim()).filter(Boolean);
+
+// 리더보드 / 출전마 카드 한 페이지당 표시 마리 수
+const LB_PAGE_SIZE = 10;
+const ENTRY_PAGE_SIZE = 12;
 
 // 경주 속도 프리셋 (배율; SPEED_SCALE=0.75 가 '보통' 기본값)
 const SPEED_PRESETS: { label: string; value: number }[] = [
@@ -64,6 +68,9 @@ const HorseRacing: React.FC = () => {
   // 경기 설정: 쉼표로 구분한 이름 문자열 → 파싱한 개수 = 말 마리 수 (색상/번호 자동)
   const [nameInput, setNameInput] = useState(() => Array.from({ length: DEFAULT_HORSES }, (_, i) => horseDef(i).name).join(', '));
   const [speed, setSpeed] = useState(SPEED_SCALE); // 경주 속도 배율 (기본 = 코드 상수)
+  const [laps, setLaps] = useState(DEFAULT_LAPS);  // 바퀴 수
+  const [lbPage, setLbPage] = useState(0);         // 리더보드 페이지
+  const [entryPage, setEntryPage] = useState(0);   // 출전마 카드 페이지
   const configRef = useRef<RaceConfig>({ horses: [] });
 
   // Canvas / Worker
@@ -101,6 +108,7 @@ const HorseRacing: React.FC = () => {
   // 이름 문자열 파싱 → 경기 설정 (이름 개수 = 마리 수, 색상/번호는 인덱스 순서 자동)
   const buildConfig = (): RaceConfig => ({
     speedScale: speed,
+    laps,
     horses: parseNames(nameInput).map((nm, i) => {
       const def = horseDef(i);
       return { name: nm.slice(0, 8) || def.name, color: def.color, dark: def.dark, number: def.number };
@@ -110,7 +118,7 @@ const HorseRacing: React.FC = () => {
   const startCd = () => {
     const cfg = buildConfig();
     configRef.current = cfg;
-    setHorses(seedSnapshots(cfg)); setFinished([]);
+    setHorses(seedSnapshots(cfg)); setFinished([]); setLbPage(0);
     setCd(3); setGs('countdown');
     let c = 3;
     cdT.current = setInterval(() => {
@@ -222,15 +230,16 @@ const HorseRacing: React.FC = () => {
       <ellipse cx={80} cy={55} rx={44} ry={22} fill="#1a5a10" />
       <ellipse cx={80} cy={55} rx={56} ry={30} fill="none" stroke="white" strokeWidth={.5} opacity={.3} />
       <line x1={80} y1={55 - 30} x2={80} y2={55 - 22} stroke="white" strokeWidth={2} opacity={.5} />
-      {/* Camera cone */}
+      {/* Camera cone (현재 바퀴 내 위치로 표시 → position % 100) */}
       {(() => {
-        const ca = (Math.min(horses.length > 0 ? [...horses].sort((a, b) => b.position - a.position).slice(0, 4).reduce((s, h) => s + h.position, 0) / 4 : 0, 100) / 100) * Math.PI * 2 - Math.PI / 2;
+        const avgPos = horses.length > 0 ? [...horses].sort((a, b) => b.position - a.position).slice(0, 4).reduce((s, h) => s + h.position, 0) / 4 : 0;
+        const ca = ((avgPos % 100) / 100) * Math.PI * 2 - Math.PI / 2;
         const cx2 = 80 + 50 * Math.cos(ca);
         const cy2 = 55 + 27 * Math.sin(ca);
         return <circle cx={cx2} cy={cy2} r={4} fill="yellow" opacity={.5} />;
       })()}
       {horses.map(h => {
-        const a = (Math.min(h.position, 100) / 100) * Math.PI * 2 - Math.PI / 2;
+        const a = ((h.position % 100) / 100) * Math.PI * 2 - Math.PI / 2;
         return <circle key={h.id} cx={80 + 50 * Math.cos(a)} cy={55 + 27 * Math.sin(a)} r={2.5} fill={h.color} stroke="white" strokeWidth={.4} />;
       })}
       <text x={80} y={105} fontSize={7} textAnchor="middle" fill="white" opacity={.5}>TRACK MAP</text>
@@ -238,6 +247,11 @@ const HorseRacing: React.FC = () => {
   );
 
   // ─── START ───
+  // 출전마 미리보기 페이징
+  const entryNames = parseNames(nameInput);
+  const entryTotalPages = Math.max(1, Math.ceil(entryNames.length / ENTRY_PAGE_SIZE));
+  const entryCurPage = Math.min(entryPage, entryTotalPages - 1);
+  const entryItems = entryNames.slice(entryCurPage * ENTRY_PAGE_SIZE, entryCurPage * ENTRY_PAGE_SIZE + ENTRY_PAGE_SIZE);
   if (gs === 'start') return (
     <div className="min-h-screen bg-gradient-to-b from-gray-900 via-gray-800 to-gray-900 flex items-center justify-center p-4 overflow-hidden relative">
       <style>{`
@@ -265,16 +279,24 @@ const HorseRacing: React.FC = () => {
             className="w-full bg-gray-800/80 border border-gray-700 focus:border-yellow-400 rounded-xl px-4 py-3 text-white text-center outline-none resize-none"
           />
           <div className="text-center text-sm mt-2">
-            {parseNames(nameInput).length >= MIN_HORSES
-              ? <span className="text-gray-400">출전 말 <span className="text-yellow-400 font-bold">{parseNames(nameInput).length}</span>마리</span>
+            {entryNames.length >= MIN_HORSES
+              ? <span className="text-gray-400">출전 말 <span className="text-yellow-400 font-bold">{entryNames.length}</span>마리</span>
               : <span className="text-red-400">최소 {MIN_HORSES}마리 이상 입력하세요</span>}
           </div>
         </div>
+        {entryTotalPages > 1 && (
+          <div className="flex items-center justify-center gap-2 mb-3 text-sm text-gray-300">
+            <button onClick={() => setEntryPage(p => Math.max(0, p - 1))} disabled={entryCurPage <= 0} className="w-7 h-7 rounded-full bg-gray-800 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center">‹</button>
+            <span className="font-mono">{entryCurPage + 1} / {entryTotalPages}</span>
+            <button onClick={() => setEntryPage(p => Math.min(entryTotalPages - 1, p + 1))} disabled={entryCurPage >= entryTotalPages - 1} className="w-7 h-7 rounded-full bg-gray-800 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center">›</button>
+          </div>
+        )}
         <div className="grid grid-cols-4 gap-3 mb-10">
-          {parseNames(nameInput).map((nm, i) => {
-            const h = horseDef(i);
+          {entryItems.map((nm, i) => {
+            const gi = entryCurPage * ENTRY_PAGE_SIZE + i;
+            const h = horseDef(gi);
             return (
-              <div key={i} className="bg-gray-800/80 backdrop-blur rounded-xl p-3 border border-gray-700 transition-all" style={{ animation: `cardIn .4s ease-out ${i * .03}s both` }}>
+              <div key={gi} className="bg-gray-800/80 backdrop-blur rounded-xl p-3 border border-gray-700 transition-all" style={{ animation: `cardIn .4s ease-out ${i * .03}s both` }}>
                 <div className="flex items-center gap-2 mb-2">
                   <div className="w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-sm shadow-lg shrink-0" style={{ backgroundColor: h.color }}>{h.number}</div>
                   <span className="text-white font-semibold text-sm truncate">{nm.slice(0, 8)}</span>
@@ -283,6 +305,15 @@ const HorseRacing: React.FC = () => {
               </div>
             );
           })}
+        </div>
+        {/* 바퀴 수 선택 */}
+        <div className="mb-6">
+          <div className="text-gray-300 font-semibold mb-2 text-center">바퀴 수</div>
+          <div className="flex justify-center gap-2 flex-wrap">
+            {Array.from({ length: MAX_LAPS - MIN_LAPS + 1 }, (_, i) => MIN_LAPS + i).map(l => (
+              <button key={l} onClick={() => setLaps(l)} className={`px-4 py-2 rounded-full font-semibold text-sm border transition-all ${laps === l ? 'bg-yellow-400 text-gray-900 border-yellow-400' : 'bg-gray-800/80 text-gray-300 border-gray-700 hover:border-gray-500'}`}>{l}바퀴</button>
+            ))}
+          </div>
         </div>
         {/* 경주 속도 선택 */}
         <div className="mb-8">
@@ -293,7 +324,7 @@ const HorseRacing: React.FC = () => {
             ))}
           </div>
         </div>
-        <div className="text-center"><button onClick={startCd} disabled={parseNames(nameInput).length < MIN_HORSES} className="bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:scale-100 text-white font-black text-3xl px-16 py-5 rounded-full transition-all duration-300 transform hover:scale-110 active:scale-95" style={{ animation: 'glow 2s ease-in-out infinite' }}>START RACE 🏁</button></div>
+        <div className="text-center"><button onClick={startCd} disabled={entryNames.length < MIN_HORSES} className="bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:scale-100 text-white font-black text-3xl px-16 py-5 rounded-full transition-all duration-300 transform hover:scale-110 active:scale-95" style={{ animation: 'glow 2s ease-in-out infinite' }}>START RACE 🏁</button></div>
       </div>
     </div>
   );
@@ -313,7 +344,10 @@ const HorseRacing: React.FC = () => {
   );
 
   // ─── RACING / FINISH ───
-  const avg = horses.length > 0 ? horses.reduce((s, h) => s + h.position, 0) / horses.length : 0;
+  // 진행률은 전체 거리(100*바퀴) 기준으로 환산해 0~100%
+  const avg = horses.length > 0 ? horses.reduce((s, h) => s + h.position, 0) / horses.length / laps : 0;
+  const maxPos = horses.length > 0 ? Math.max(...horses.map(h => h.position)) : 0;
+  const curLap = Math.min(laps, Math.floor(maxPos / 100) + 1);
   const finishRank = new Map(finished.map(f => [f.id, f.rank]));
   const leaderboard = [...horses].sort((a, b) => {
     const ar = finishRank.get(a.id), br = finishRank.get(b.id);
@@ -322,6 +356,10 @@ const HorseRacing: React.FC = () => {
     return b.position - a.position;
   });
   const el = elapsed();
+  // 리더보드 페이징
+  const lbTotalPages = Math.max(1, Math.ceil(leaderboard.length / LB_PAGE_SIZE));
+  const lbCurPage = Math.min(lbPage, lbTotalPages - 1);
+  const lbItems = leaderboard.slice(lbCurPage * LB_PAGE_SIZE, lbCurPage * LB_PAGE_SIZE + LB_PAGE_SIZE);
 
   return (
     <div className="min-h-screen bg-gray-900 flex flex-col relative overflow-hidden">
@@ -340,7 +378,7 @@ const HorseRacing: React.FC = () => {
           <span className="text-white font-bold">{gs === 'finish' ? '🏆 경주 종료!' : '🏁 경주 진행중'}</span>
         </div>
         <div className="text-green-400 font-mono font-bold text-lg tracking-wider">{fmt(el)}</div>
-        <span className="text-yellow-400 font-semibold text-sm">제 1 경주</span>
+        <span className="text-yellow-400 font-semibold text-sm">{laps > 1 ? `🏁 ${curLap} / ${laps} 바퀴` : '제 1 경주'}</span>
       </div>
 
       {/* Main */}
@@ -351,17 +389,31 @@ const HorseRacing: React.FC = () => {
         </div>
 
         {/* Sidebar */}
-        <div className="w-52 bg-gray-900/95 border-l border-gray-700/50 p-3 flex flex-col gap-2 z-10 overflow-y-auto shrink-0">
-          <h3 className="text-white font-bold text-sm flex items-center gap-1.5 mb-1">📊 실시간 순위</h3>
-          {leaderboard.map((h, i) => (
-            <div key={h.id} className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg transition-all ${i === 0 ? 'bg-yellow-500/20 border border-yellow-500/40' : 'bg-gray-800/60'}`}>
-              <span className="text-white font-bold w-5 text-center text-xs">{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}`}</span>
-              <div className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0" style={{ backgroundColor: h.color }}>{h.number}</div>
-              <span className="text-white text-xs font-medium flex-1 truncate">{h.name}</span>
-              <span className="text-gray-400 text-[10px] font-mono">{h.finished ? '✅' : `${Math.round(h.position)}%`}</span>
-            </div>
-          ))}
-          <div className="mt-auto pt-2 border-t border-gray-700/50">
+        <div className="w-52 bg-gray-900/95 border-l border-gray-700/50 p-3 flex flex-col gap-2 z-10 overflow-hidden shrink-0">
+          <div className="flex items-center justify-between gap-1">
+            <h3 className="text-white font-bold text-sm flex items-center gap-1.5">📊 실시간 순위</h3>
+            {lbTotalPages > 1 && (
+              <div className="flex items-center gap-1 text-[10px] text-gray-300 shrink-0">
+                <button onClick={() => setLbPage(p => Math.max(0, p - 1))} disabled={lbCurPage <= 0} className="w-5 h-5 rounded bg-gray-800 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center">‹</button>
+                <span className="font-mono w-8 text-center">{lbCurPage + 1}/{lbTotalPages}</span>
+                <button onClick={() => setLbPage(p => Math.min(lbTotalPages - 1, p + 1))} disabled={lbCurPage >= lbTotalPages - 1} className="w-5 h-5 rounded bg-gray-800 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center">›</button>
+              </div>
+            )}
+          </div>
+          <div className="flex flex-col gap-2 flex-1 overflow-y-auto min-h-0">
+            {lbItems.map((h, i) => {
+              const gi = lbCurPage * LB_PAGE_SIZE + i; // 전체 순위 인덱스
+              return (
+                <div key={h.id} className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg transition-all ${gi === 0 ? 'bg-yellow-500/20 border border-yellow-500/40' : 'bg-gray-800/60'}`}>
+                  <span className="text-white font-bold w-5 text-center text-xs">{gi === 0 ? '🥇' : gi === 1 ? '🥈' : gi === 2 ? '🥉' : `${gi + 1}`}</span>
+                  <div className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0" style={{ backgroundColor: h.color }}>{h.number}</div>
+                  <span className="text-white text-xs font-medium flex-1 truncate">{h.name}</span>
+                  <span className="text-gray-400 text-[10px] font-mono">{h.finished ? '✅' : `${Math.round(h.position / laps)}%`}</span>
+                </div>
+              );
+            })}
+          </div>
+          <div className="pt-2 border-t border-gray-700/50">
             <div className="text-gray-400 text-[10px] mb-1">PROGRESS</div>
             <div className="h-2 bg-gray-700 rounded-full overflow-hidden"><div className="h-full rounded-full transition-all duration-75" style={{ width: `${Math.min(100, avg)}%`, background: 'linear-gradient(90deg,#22c55e,#eab308,#ef4444)' }} /></div>
             <div className="text-right text-gray-500 text-[10px] mt-0.5">{Math.round(avg)}%</div>

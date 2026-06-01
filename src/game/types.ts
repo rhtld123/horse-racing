@@ -56,10 +56,11 @@ export interface HorseConfig {
   number: number;
 }
 
-// 한 경기 설정 (말 목록 = 마리 수, 속도 배율)
+// 한 경기 설정 (말 목록 = 마리 수, 속도 배율, 바퀴 수)
 export interface RaceConfig {
   horses: HorseConfig[];
   speedScale?: number; // 미지정 시 SPEED_SCALE 사용
+  laps?: number;       // 미지정 시 1바퀴
 }
 
 // Main → Worker 메시지
@@ -100,6 +101,11 @@ export const SPEED_SCALE = 0.75;
 // 말 마리 수: 코드 기본값 + 최소값 (상한 없음 — 많을수록 레인 겹치고 렉 가능)
 export const DEFAULT_HORSES = 8;
 export const MIN_HORSES = 2;
+
+// 바퀴 수 범위
+export const DEFAULT_LAPS = 1;
+export const MIN_LAPS = 1;
+export const MAX_LAPS = 5;
 
 // 인덱스별 말 정의 (0~7 은 팔레트 HD, 8+ 는 HSL 골든앵글 자동 생성색)
 export const horseDef = (i: number): HorseConfig => {
