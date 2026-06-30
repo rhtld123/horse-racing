@@ -16,12 +16,19 @@ export class GameEngine {
     const list = config?.horses ?? HD.map(h => ({ name: h.name, color: h.c, dark: h.d, number: h.n }));
     const scale = config?.speedScale ?? SPEED_SCALE;
     this.total = 100 * Math.max(1, Math.floor(config?.laps ?? 1));
-    this.horses = list.map((h, i) => ({
-      id: i, name: h.name, number: h.number, color: h.color, dark: h.dark,
-      position: 0, baseSpeed: (.04 + Math.random() * .02) * scale,
-      fatigue: .15 + Math.random() * .25, kick: .8 + Math.random() * .7,
-      finished: false, lane: i, boost: 0,
-    }));
+    // 필드가 작을수록(2~4마리) 1에 가까운 보정 계수. 6마리 이상은 0(기존 밸런스 유지)
+    const fewness = Math.max(0, (6 - list.length) / 4);
+    this.horses = list.map((h, i) => {
+      // 작은 필드에서는 타고난 속도(baseSpeed) 편차를 평균(.05)으로 압축 → 한 끗 차 접전 유도
+      const raw = .04 + Math.random() * .02;
+      const baseSpeed = (.05 + (raw - .05) * (1 - .7 * fewness)) * scale;
+      return {
+        id: i, name: h.name, number: h.number, color: h.color, dark: h.dark,
+        position: 0, baseSpeed,
+        fatigue: .15 + Math.random() * .25, kick: .8 + Math.random() * .7,
+        finished: false, lane: i, boost: 0,
+      };
+    });
     this.particles = [];
     this.finished = [];
     this.pid = 0;
@@ -40,6 +47,8 @@ export class GameEngine {
     this.frame++;
     const horses = this.horses;
     const laneCount = horses.length;
+    // 작은 필드 보정 계수(init과 동일): 2마리=1, 4마리=0.5, 6마리+=0
+    const fewness = Math.max(0, (6 - laneCount) / 4);
 
     // 순위 계산 (in-place, 배열 복사 최소화)
     let maxPos = 0, allDone = true;
@@ -67,7 +76,8 @@ export class GameEngine {
       const stam = remaining < 30 ? 1 - ((30 - remaining) / 30) * h.fatigue : 1;
       const k = remaining < 25 ? h.kick : 1;
       // 추격(러버밴딩): 뒤처질수록 더 강하게 따라붙음 (초반 순위가 굳지 않도록)
-      const rubber = 1 + (maxPos - h.position) * 0.006;
+      // 작은 필드에서는 계수를 키워 격차를 더 빨리 좁힘
+      const rubber = 1 + (maxPos - h.position) * 0.006 * (1 + 2 * fewness);
       const rank = ranks[i];
       // 부스트 상태: 양수=부스터 남은 프레임 / 음수=쿨다운 / 0=대기
       // 끝나면 쿨다운(강제 OFF)으로 즉시 재발동을 막아 켜짐/꺼짐이 분명하게
@@ -84,10 +94,12 @@ export class GameEngine {
       }
       // 발동 구간은 레이스 전체 진행(선두 기준)으로 → 앞·뒤가 동시에 후보 (앞이 먼저 터지는 버그 수정)
       if (boost === 0 && rank >= 1 && racePhase > .04 && remaining > 1) {
-        if (Math.random() < .0016 + drama * .02) boost = 70 + Math.round(drama * 150) + Math.floor(Math.random() * 20);
+        // 작은 필드에서는 발동 확률을 더해 추격 부스터가 자주 터지게
+        if (Math.random() < .0016 + drama * .02 + .012 * fewness) boost = 70 + Math.round(drama * 150) + Math.floor(Math.random() * 20);
       }
       // 발동하면 세기를 고정(강하게) → 뒤에서 끝까지 치고 올라와 실제 역전까지
-      const bm = boost > 0 ? 1.95 : 1;
+      // 작은 필드에서는 부스터 세기도 살짝 강화
+      const bm = boost > 0 ? 1.95 + .2 * fewness : 1;
       h.position = h.position + Math.max(0.02, h.baseSpeed * v * stam * k * rubber * bm);
       h.boost = boost;
       if (h.position >= this.total) {
